@@ -1,0 +1,9 @@
+{
+  "name": "Remix: TokSave AI",
+  "description": "High-speed, watermark-free video downloader for TikTok, Reels, and Shorts featuring a neumorphic dark UI and built-in private vault.",
+  "requestFramePermissions": [
+    "clipboard-read",
+    "clipboard-write"
+  ],
+  "majorCapabilities": []
+}
