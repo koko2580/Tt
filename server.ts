@@ -427,6 +427,29 @@ async function startServer() {
     }
   });
 
+  // Export ready-to-build Android source package
+  app.get("/api/export-android", async (req, res) => {
+    try {
+      const { exec } = await import("child_process");
+      const exportFile = "/tmp/toksave-android-project.tar.gz";
+      exec(
+        `tar --exclude="android/.gradle" --exclude="android/app/build" -czf ${exportFile} android capacitor.config.ts`,
+        { cwd: process.cwd() },
+        (err) => {
+          if (err) {
+            console.error("Failed to tar android project", err);
+            return res.status(500).json({ error: "Failed to package Android project" });
+          }
+          res.setHeader("Content-Disposition", 'attachment; filename="toksave-android-project.tar.gz"');
+          res.setHeader("Content-Type", "application/gzip");
+          res.sendFile(exportFile);
+        }
+      );
+    } catch (err: any) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   // Vite middleware for development
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
