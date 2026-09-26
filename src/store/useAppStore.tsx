@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, ReactNode } from 'react';
 import { DownloadItem, AppSettings, ToastNotification, ProcessedUrlHistoryItem } from '../types';
-import { FileTransfer } from '@capacitor/file-transfer';
 import { Filesystem, Directory } from '@capacitor/filesystem';
+import { extractMedia, detectPlatform } from '../services/videoExtractor';
 
 interface AppContextType {
   downloads: DownloadItem[];
@@ -14,6 +14,7 @@ interface AppContextType {
   hideToast: () => void;
   setActivePreviewItem: (item: DownloadItem | null) => void;
   addDownload: (url: string, format: 'mp4' | 'mp3', quality?: string) => Promise<void>;
+  retryDownload: (id: string) => Promise<void>;
   removeDownload: (id: string) => void;
   toggleFavorite: (id: string) => void;
   toggleVault: (id: string) => void;
@@ -176,165 +177,183 @@ export function AppProvider({ children }: { children: ReactNode }) {
     await processDownload(newDownload.id, url, format);
   };
 
-  const processDownload = async (id: string, url: string, format: string) => {
+  const processDownload = async (id: string, url: string, format: 'mp4' | 'mp3') => {
+    let animInterval: any = null;
     try {
-      let extractData: any;
-      const isCapacitor = window.location.origin.includes('localhost') || window.location.protocol === 'capacitor:';
-      const baseUrl = isCapacitor ? 'https://ais-pre-vvndohw3heoqtxdk67cusa-436071492721.asia-southeast1.run.app' : '';
-
-      // Direct client extraction attempt for TikTok
-      if (url.includes('tiktok.com')) {
-        try {
-          const params = new URLSearchParams({ url, hd: "1" });
-          const req = await fetch("https://tikwm.com/api/?" + params.toString());
-          const res = Object.keys(req).length > 0 ? await req.json() : {};
-          
-          if (res?.code === 0 && res?.data?.play) {
-            extractData = {
-              title: (res.data.title || "TikTok Video").slice(0, 60),
-              thumbnail: res.data.cover,
-              url: res.data.play,
-              platform: "tiktok",
-              fileSize: res.data.size ? `${(res.data.size / (1024 * 1024)).toFixed(1)} MB` : undefined,
-              duration: res.data.duration ? `${Math.floor(res.data.duration / 60)}:${(res.data.duration % 60).toString().padStart(2, '0')}` : undefined,
-            };
-          }
-        } catch (e) {
-          console.warn("Direct TikTok fallback failed", e);
-        }
-      }
-
-      // Backend extraction
-      if (!extractData) {
-        const extractRes = await fetch(`${baseUrl}/api/extract`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url, format })
-        });
-        
-        if (!extractRes.ok) throw new Error("Extraction failed on backend");
-        extractData = await extractRes.json();
-      }
+      // 1. Universal Media Extraction (Direct standalone client APIs for Android & Web)
+      const extractData = await extractMedia(url, format);
 
       setDownloads(prev => prev.map(d => d.id === id ? {
         ...d,
-        title: extractData.title || `Video_${Date.now()}`,
+        title: extractData.title || `Media_${Date.now()}`,
         thumbnail: extractData.thumbnail || d.thumbnail,
         downloadUrl: extractData.url,
         fileSize: extractData.fileSize || '14.2 MB',
         duration: extractData.duration || '0:30',
-        progress: 25
+        progress: 30
       } : d));
 
       addOrUpdateUrlHistory({
         url,
         title: extractData.title,
         thumbnail: extractData.thumbnail,
-        platform: extractData.platform || detectPlatform(url),
+        platform: extractData.platform,
         format: format as any,
       });
 
       if (!extractData.url) {
-        throw new Error("No URL returned from extraction API");
+        throw new Error('No playable stream URL found for this video.');
       }
 
-      // Progress simulation
-      let animProgress = 25;
-      const interval = setInterval(() => {
+      // Progress animation simulation
+      let animProgress = 30;
+      animInterval = setInterval(() => {
         animProgress += Math.floor(Math.random() * 8) + 4;
-        if (animProgress > 92) animProgress = 92;
+        if (animProgress > 90) animProgress = 90;
         setDownloads(prev => prev.map(d => d.id === id && d.status === 'downloading' ? { ...d, progress: animProgress } : d));
-      }, 400);
+      }, 350);
 
-      try {
-        const isCapacitorNative =
-          (window as any).Capacitor &&
-          (window as any).Capacitor.getPlatform() !== "web";
-        const downloadDest = `TokSave_${Date.now()}.${format}`;
+      const downloadDest = `TokSave_${Date.now()}.${format}`;
+      const isCapacitorNative =
+        (window as any).Capacitor &&
+        (window as any).Capacitor.getPlatform() !== 'web';
 
-        if (isCapacitorNative) {
-          const fileInfo = await Filesystem.getUri({
+      let finalDownloadUrl = extractData.url;
+
+      if (isCapacitorNative) {
+        // Native Android saving with permissions
+        try {
+          const permStatus = await Filesystem.checkPermissions();
+          if (permStatus.publicStorage !== 'granted') {
+            await Filesystem.requestPermissions();
+          }
+        } catch (permErr) {
+          console.warn('Storage permission check warning:', permErr);
+        }
+
+        try {
+          // Native Filesystem download
+          await Filesystem.downloadFile({
+            url: extractData.url,
+            path: downloadDest,
+            directory: Directory.Documents,
+            recursive: true,
+          });
+
+          const uriRes = await Filesystem.getUri({
             directory: Directory.Documents,
             path: downloadDest,
           });
-
-          // First try downloading directly from stream url
-          try {
-            await FileTransfer.downloadFile({
-              url: extractData.url,
-              path: fileInfo.uri,
-              progress: false,
-            });
-          } catch (nativeDirectErr) {
-            console.warn("Direct native download failed, trying proxy:", nativeDirectErr);
-            const proxyUrl = `${baseUrl}/api/download-blob?url=${encodeURIComponent(extractData.url)}`;
-            await FileTransfer.downloadFile({
-              url: proxyUrl,
-              path: fileInfo.uri,
-              progress: false,
-            });
+          if (uriRes?.uri) {
+            finalDownloadUrl = uriRes.uri;
           }
-          clearInterval(interval);
-        } else {
-          // Web browser download
-          let blob: Blob | null = null;
-          try {
-            const directRes = await fetch(extractData.url, { mode: "cors" });
-            if (directRes.ok) {
-              blob = await directRes.blob();
-            }
-          } catch (corsErr) {
-            // CORS restricted, fallback to backend proxy
-          }
+        } catch (nativeDownloadErr) {
+          console.warn('Filesystem.downloadFile fallback to blob fetch:', nativeDownloadErr);
+          // Fallback: Fetch blob directly using Capacitor native networking
+          const resp = await fetch(extractData.url);
+          if (!resp.ok) throw new Error('Could not stream media file');
+          const blob = await resp.blob();
 
-          if (!blob) {
-            const proxyUrl = `${baseUrl}/api/download-blob?url=${encodeURIComponent(extractData.url)}`;
+          // Convert to base64
+          const reader = new FileReader();
+          const base64Data = await new Promise<string>((resolve, reject) => {
+            reader.onloadend = () => {
+              const resStr = reader.result as string;
+              resolve(resStr.includes(',') ? resStr.split(',')[1] : resStr);
+            };
+            reader.onerror = reject;
+            reader.readAsDataURL(blob);
+          });
+
+          await Filesystem.writeFile({
+            path: downloadDest,
+            data: base64Data,
+            directory: Directory.Documents,
+            recursive: true,
+          });
+
+          const uriRes = await Filesystem.getUri({
+            directory: Directory.Documents,
+            path: downloadDest,
+          });
+          if (uriRes?.uri) {
+            finalDownloadUrl = uriRes.uri;
+          }
+        }
+      } else {
+        // Web browser environment download
+        let blob: Blob | null = null;
+        try {
+          const directRes = await fetch(extractData.url, { mode: 'cors' });
+          if (directRes.ok) {
+            blob = await directRes.blob();
+          }
+        } catch (corsErr) {
+          console.warn('Direct blob fetch failed, falling back to proxy:', corsErr);
+        }
+
+        if (!blob) {
+          try {
+            const proxyUrl = `/api/download-blob?url=${encodeURIComponent(extractData.url)}`;
             const proxyRes = await fetch(proxyUrl);
-            if (!proxyRes.ok) throw new Error("Stream proxy failed");
-            blob = await proxyRes.blob();
+            if (proxyRes.ok) {
+              blob = await proxyRes.blob();
+            }
+          } catch (proxyErr) {
+            console.warn('Proxy blob fetch failed:', proxyErr);
           }
+        }
 
-          clearInterval(interval);
+        if (blob) {
           const objectUrl = window.URL.createObjectURL(blob);
-
-          // Trigger browser download
-          const a = document.createElement("a");
+          finalDownloadUrl = objectUrl;
+          const a = document.createElement('a');
           a.href = objectUrl;
           a.download = downloadDest;
           document.body.appendChild(a);
           a.click();
           a.remove();
           setTimeout(() => window.URL.revokeObjectURL(objectUrl), 60000);
-        }
-      } catch (blobErr) {
-        clearInterval(interval);
-        console.warn("File download fallback to window.open", blobErr);
-        // Fallback: direct download link opening
-        if ((window as any).Capacitor && (window as any).Capacitor.getPlatform() !== "web") {
-          window.open(extractData.url, "_system");
         } else {
-          window.open(extractData.url, "_blank");
+          // Direct link fallback
+          window.open(extractData.url, '_blank');
         }
       }
+
+      if (animInterval) clearInterval(animInterval);
 
       setDownloads(prev => prev.map(d => d.id === id ? {
         ...d,
         status: 'completed',
         progress: 100,
-        downloadUrl: extractData.url,
+        downloadUrl: finalDownloadUrl,
       } : d));
 
       showToast('Download Completed!', extractData.title?.slice(0, 30) || 'Saved successfully', 'success');
 
     } catch (e: any) {
-      console.error(e);
+      if (animInterval) clearInterval(animInterval);
+      console.error('Download error:', e);
       setDownloads(prev => prev.map(d => d.id === id ? {
         ...d,
         status: 'failed',
-        title: 'Download Failed'
+        title: d.title && d.title !== 'Connecting & Fetching...' ? d.title : 'Download Failed'
       } : d));
-      showToast('Download Failed', 'Could not fetch video. Check link and retry.', 'error');
+      showToast('Download Failed', e.message || 'Could not fetch video. Check link and retry.', 'error');
     }
+  };
+
+  const retryDownload = async (id: string) => {
+    const item = downloads.find(d => d.id === id);
+    if (!item) return;
+    setDownloads(prev => prev.map(d => d.id === id ? {
+      ...d,
+      status: 'downloading',
+      progress: 10,
+      title: 'Connecting & Fetching...'
+    } : d));
+    showToast('Retrying Download', `Re-fetching ${item.format.toUpperCase()}...`, 'info');
+    await processDownload(id, item.url, item.format);
   };
 
   const removeDownload = (id: string) => {
@@ -443,6 +462,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       hideToast,
       setActivePreviewItem,
       addDownload,
+      retryDownload,
       removeDownload,
       toggleFavorite,
       toggleVault,

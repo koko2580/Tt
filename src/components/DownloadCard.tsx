@@ -1,12 +1,12 @@
 import React from "react";
 import { DownloadItem } from "../types";
-import { Play, Trash2, Heart, Share2, Shield, ShieldCheck, Film, Music, CheckCircle2 } from "lucide-react";
+import { Play, Trash2, Heart, Share2, Shield, ShieldCheck, Film, Music, CheckCircle2, RotateCcw } from "lucide-react";
 import { useAppStore } from "../store/useAppStore";
 import { cn } from "../lib/utils";
 import { motion } from "motion/react";
 
 export default function DownloadCard({ item }: { item: DownloadItem; key?: React.Key }) {
-  const { removeDownload, toggleFavorite, favorites, toggleVault, setActivePreviewItem, showToast } = useAppStore();
+  const { removeDownload, toggleFavorite, favorites, toggleVault, setActivePreviewItem, showToast, retryDownload } = useAppStore();
   const isFav = favorites.includes(item.id);
 
   const handleShare = async () => {
@@ -113,12 +113,36 @@ export default function DownloadCard({ item }: { item: DownloadItem; key?: React
                   </span>
                 </>
               )}
+              {item.status === "failed" && (
+                <>
+                  <span aria-hidden="true" className="text-zinc-600">·</span>
+                  <button
+                    onClick={() => retryDownload(item.id)}
+                    className="text-amber-400 hover:text-amber-300 font-semibold flex items-center gap-1 bg-amber-500/10 px-1.5 py-0.5 rounded text-[10px] border border-amber-500/20 active:scale-95 transition-all"
+                  >
+                    <RotateCcw className="w-2.5 h-2.5" /> Retry
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
           {/* iOS Quick Action Toolbar */}
           <div className="flex items-center justify-between pt-2 border-t border-white/[0.05]">
             <div className="flex items-center gap-1">
+              {/* Retry button for failed item */}
+              {item.status === "failed" && (
+                <button
+                  type="button"
+                  onClick={() => retryDownload(item.id)}
+                  title="Retry Download"
+                  className="p-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-400 active:scale-90 transition-all flex items-center gap-1 px-2 text-xs font-semibold"
+                >
+                  <RotateCcw className="w-3.5 h-3.5" />
+                  <span className="text-[10px]">Retry</span>
+                </button>
+              )}
+
               {/* Play button */}
               {item.status === "completed" && (
                 <button
